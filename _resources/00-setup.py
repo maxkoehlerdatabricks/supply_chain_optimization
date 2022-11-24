@@ -4,7 +4,7 @@ dbutils.widgets.dropdown("reset_all_data", "false", ["true", "false"], "Reset al
 # COMMAND ----------
 
 import os
-import re #
+import re 
 import mlflow
 db_prefix = "supply_chain_optimization"
 
@@ -41,28 +41,25 @@ reset_all_bool = (reset_all == 'true')
 
 # COMMAND ----------
 
-###Run generate data!!!
+path = cloud_storage_path
+
+dirname = os.path.dirname(dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get())
+filename = "01-data-generator"
+if (os.path.basename(dirname) != '_resources'):
+  dirname = os.path.join(dirname,'_resources')
+generate_data_notebook_path = os.path.join(dirname,filename)
+
+def generate_data():
+  dbutils.notebook.run(generate_data_notebook_path, 600, {"reset_all_data": reset_all, "dbName": dbName, "cloud_storage_path": cloud_storage_path})
 
 
-#path = cloud_storage_path
-
-#dirname = os.path.dirname(dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get())
-#filename = "01-data-generator"
-#if (os.path.basename(dirname) != '_resources'):
-#  dirname = os.path.join(dirname,'_resources')
-#generate_data_notebook_path = os.path.join(dirname,filename)
-#
-#def generate_data():
-#  dbutils.notebook.run(generate_data_notebook_path, 600, {"reset_all_data": reset_all, "dbName": dbName, "cloud_storage_path": cloud_storage_path})
-#
-#
-#if reset_all_bool:
-#  generate_data()
-#else:
-#  try:
-#    dbutils.fs.ls(path)
-#  except: 
-#    generate_data()
+if reset_all_bool:
+  generate_data()
+else:
+  try:
+    dbutils.fs.ls(path)
+  except: 
+    generate_data()
 
 # COMMAND ----------
 
