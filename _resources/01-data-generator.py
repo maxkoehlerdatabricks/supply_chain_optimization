@@ -22,19 +22,10 @@ print(reset_all_data)
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC # Hierarchical Time Series Generator
-# MAGIC This notebook-section simulates hierarchical time series data
+# MAGIC ## Packages
 
 # COMMAND ----------
 
-# MAGIC %md
-# MAGIC ## Simulate demand series data
-
-# COMMAND ----------
-
-#################################################
-# Python Packages
-#################################################
 import pandas as pd
 import numpy as np
 import datetime
@@ -49,6 +40,14 @@ import random
 import pyspark.sql.functions as f
 from pyspark.sql.types import *
 from pyspark.sql.window import Window
+
+import statsmodels.api as sm
+import matplotlib.pyplot as plt
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Simulate demand series data
 
 # COMMAND ----------
 
@@ -124,13 +123,10 @@ start_date = end_date + relativedelta(weeks= (- ts_length_in_weeks))
 # Make a sequence 
 date_range = list(rrule.rrule(rrule.WEEKLY, dtstart=start_date, until=end_date))
 
-#Create a table
-date_range_table = spark.createDataFrame(
-  date_range,
-  DateType()).toDF("date")
+#Create a pandas data frame
+date_range = pd.DataFrame(date_range, columns =['date'])
 
-
-display(date_range_table)
+display(date_range)
 
 # COMMAND ----------
 
@@ -140,7 +136,8 @@ display(date_range_table)
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC To Do: Make more realistic
+# MAGIC To Do: 
+# MAGIC - Make more realistic to have similar magnitudes per product group
 
 # COMMAND ----------
 
@@ -159,7 +156,6 @@ np.random.seed(123)
 n_ = products_in_stores_table.count()
 
 
-
 variance_random_number = list(abs(np.random.normal(100, 50, n_)))
 offset_random_number = list(np.maximum(abs(np.random.normal(10000, 5000, n_)), 4000))
 ar_length_random_number = np.random.choice(list(range(1,4)), n_)
@@ -175,31 +171,37 @@ pdf_helper = (pd.DataFrame(variance_random_number, columns =['Variance_RN']).
               assign(MA_Pars_RN = ma_parameters_random_number) 
              )
 
-# Append column-wise
 spark_df_helper = spark.createDataFrame(pdf_helper, schema=arma_schema)
-spark_df_helper = spark_df_helper.withColumn("row_id", monotonically_increasing_id()).withColumn('row_num', f.row_number().over(Window.orderBy('row_id')))
-products_in_stores_table = products_in_stores_table.withColumn("row_id", monotonically_increasing_id()).withColumn('row_num', f.row_number().over(Window.orderBy('row_id')))
-products_in_stores_table = products_in_stores_table.join(spark_df_helper, ("row_num")).drop("row_id", "row_num")
+spark_df_helper = (spark_df_helper.
+  withColumn("row_id", f.monotonically_increasing_id()).
+  withColumn('row_num', f.row_number().over(Window.orderBy('row_id'))).
+  drop(f.col("row_id"))
+                  )
+
+products_in_stores_table = (products_in_stores_table.
+                            withColumn("row_id", f.monotonically_increasing_id()).
+                            withColumn('row_num', f.row_number().over(Window.orderBy('row_id'))).
+                            drop(f.col("row_id"))
+                           )
+
+
+products_in_stores_table = products_in_stores_table.join(spark_df_helper, ("row_num")).drop(f.col("row_num"))
 display(products_in_stores_table)
 
 # COMMAND ----------
 
-
-
-# COMMAND ----------
-
 # MAGIC %md 
-# MAGIC Generate Demand Series
+# MAGIC Generate individual demand series
 
 # COMMAND ----------
 
-import statsmodels.api as sm
-import matplotlib.pyplot as plt
+# To maximize parallelism, we can allocate each ("product", store") group its own Spark task.
+# We can achieve this by:
+# - disabling Adaptive Query Execution (AQE) just for this step
+# - partitioning our input Spark DataFrame as follows:
+spark.conf.set("spark.databricks.optimizer.adaptive.enabled", "false")
+n_tasks = products_in_stores_table.select("product", "store").distinct().count()
 
-
-#################################################
-# Generate an individual time series for each Product-SKU combination
-#################################################
 
 # function to generate an ARMA process
 def generate_arma(arparams, maparams, var, offset, number_of_points, plot):
@@ -219,75 +221,57 @@ def generate_arma(arparams, maparams, var, offset, number_of_points, plot):
 
 
 #Schema for output dataframe
-schema = StructType(  products_in_stores_table.schema.fields + 
+schema = StructType(  
                     [
+                      StructField("product", StringType(), True),
+                      StructField("store", StringType(), True),
                       StructField("date", DateType(), True),
                       StructField("demand", FloatType(), True),
                       StructField("row_number", FloatType(), True)
                     ])
 
 # Generate an ARMA
-#pdf = product_hierarchy_extended.toPandas().head(1)
-
-# Generate a time series with random parameters
-# @pandas_udf(schema, PandasUDFType.GROUPED_MAP)
-
 def time_series_generator_pandas_udf(pdf):
   out_df = date_range.assign(
    demand = generate_arma(arparams = pdf.AR_Pars_RN.iloc[0], 
-                          maparams= pdf.MA_Pars_RN.iloc[0], 
-                          var = pdf.Variance_RN.iloc[0], 
-                          offset = pdf.Offset_RN.iloc[0], 
-                          number_of_points = date_range.shape[0], 
-                          plot = False),
-    product = pdf.product.iloc[0]
+                        maparams= pdf.MA_Pars_RN.iloc[0], 
+                        var = pdf.Variance_RN.iloc[0], 
+                        offset = pdf.Offset_RN.iloc[0], 
+                        number_of_points = date_range.shape[0], 
+                        plot = False),
+  product = pdf["product"].iloc[0],
+  store = pdf["store"].iloc[0]
   )
-
-  out_df = out_df[["product", "date", "demand"]]
   
   out_df["row_number"] = range(0,len(out_df))
+  
+  out_df = out_df[["product", "store", "date", "demand", "row_number"]]
 
   return(out_df)
 
+#pdf = products_in_stores_table.toPandas().head(1)
+
 # Apply the Pandas UDF and clean up
 demand_df = ( 
-  products_in_stores_table 
-  .groupby("product") 
-  .applyInPandas(time_series_generator_pandas_udf, sku_ts_schema) 
-  .withColumn("Demand" , col("Demand") * col("Corona_Factor")) 
-  .withColumn("Demand", when(col("Corona_Breakpoint_Helper") == 0,   
-                             col("Demand") + trend_factor_before_corona * sqrt(col("Row_Number"))) 
-                        .otherwise( col("Demand")))  
-  .withColumn("Demand" , col("Demand") * col("Factor_XMas"))
-  .withColumn("Demand" , round(col("Demand")))
-  .select(col("Product"), col("SKU"), col("Date"), col("Demand") )
-   )
+  products_in_stores_table.
+   repartition(n_tasks, "product", "store").
+   groupby("product", "store"). 
+   applyInPandas(time_series_generator_pandas_udf, schema)
+)
 
+assert date_range.shape[0] * products_in_stores_table.count() == demand_df.count()
 
 display(demand_df)
 
 # COMMAND ----------
 
-# Plot individual series
-res_table = demand_df.toPandas()
-all_combis = res_table[[ "Product" , "SKU" ]].drop_duplicates()
-random_series_to_plot = pd.merge(  res_table,   all_combis.iloc[[random.choice(list(range(len(all_combis))))]] ,  on =  [ "Product" , "SKU" ], how = "inner" )
-selected_product = random_series_to_plot[ 'Product' ].iloc[0]
-selected_sku = random_series_to_plot[ 'SKU' ].iloc[0]
-random_series_to_plot = random_series_to_plot[["Date","Demand"]]
-
-#Plot
-plt.plot_date(random_series_to_plot.Date, random_series_to_plot.Demand, linestyle='solid')
-plt.gcf().autofmt_xdate()
-plt.title(f"Product: {selected_product}, SKU: {selected_sku}.")
-plt.xlabel('Date')
-plt.ylabel('Demand')
-plt.show()
+# Select a sepecific time series
+display(demand_df.join(demand_df.sample(False, 1 / demand_df.count(), seed=0).limit(1).select("product", "store"), on=["product", "store"], how="inner"))
 
 # COMMAND ----------
 
-# Plot a sepecific time series
-display(demand_df.join(demand_df.sample(False, 1 / demand_df.count(), seed=0).limit(1).select("SKU"), on=["SKU"], how="inner"))
+# MAGIC %md
+# MAGIC Save as a Delta table
 
 # COMMAND ----------
 
@@ -313,187 +297,6 @@ display(spark.sql(f"SELECT * FROM {dbName}.part_level_demand"))
 # COMMAND ----------
 
 display(spark.sql(f"SELECT COUNT(*) as row_count FROM {dbName}.part_level_demand"))
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC # Simulate BoM Data
-# MAGIC This notebook section simulates Bill-Of-Material data
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## Simulate data
-
-# COMMAND ----------
-
-import string
-import networkx as nx
-import random
-import numpy as np
-import os
-
-# COMMAND ----------
-
-def id_generator(size=6, chars=string.ascii_uppercase + string.digits):
-    return ''.join(random.choice(chars) for _ in range(size))
-
-def generate_random_strings(n):
-  random.seed(123)
-  random_mat_numbers = set()
-  while True:
-    random_mat_numbers.add(id_generator(size=5))
-    if len(random_mat_numbers) >= n:
-      break
-  return(random_mat_numbers)
-
-# COMMAND ----------
-
-def extend_one_step(node_from_):
-  res_ = [  ]
-  node_list_to_be_extended_ = [  ]
-  # second level
-  random_split_number = random.randint(2, 4)
-  for i in range(random_split_number):
-    node_to = random_mat_numbers.pop()
-    node_list_to_be_extended_.append(node_to)
-    res_.append((node_to, node_from_))
-  return res_, node_list_to_be_extended_
-
-# COMMAND ----------
-
-def extend_one_level(node_list_to_be_extended, level, sku):
-  
-  
-  print(f"""In  'extend_one_level': level={level} and sku = {sku}  """)
-  
-  if level == 1:
-    head_node = random_mat_numbers.pop() 
-    node_list_to_be_extended_one_level = [ ]
-    node_list_to_be_extended_one_level.append(head_node)
-    res_one_level = [ (head_node, sku) ]
-  else:
-    res_one_level = [ ]
-    node_list_to_be_extended_one_level = [ ]
-    
-    if len(node_list_to_be_extended) > 2:
-      node_list_to_be_extended_ = node_list_to_be_extended[ : 3 ]
-    else:
-      node_list_to_be_extended_ = node_list_to_be_extended
-
-    for node in node_list_to_be_extended_:
-      res_one_step = [ ]
-      node_list_to_be_extended_one_step = [ ]
-      
-      res_one_step, node_list_to_be_extended_one_step = extend_one_step(node)    
-      res_one_level.extend(res_one_step)
-      node_list_to_be_extended_one_level.extend(node_list_to_be_extended_one_step)
-  
-  return res_one_level, node_list_to_be_extended_one_level
-
-# COMMAND ----------
-
-#Generate a set of material numbers
-random_mat_numbers = generate_random_strings(1000000)
-
-# COMMAND ----------
-
-#Create a listof all SKU's
-demand_df = spark.read.table(f"{dbName}.part_level_demand")
-all_skus = demand_df.select('SKU').distinct().rdd.flatMap(lambda x: x).collect()
-
-# COMMAND ----------
-
-# Generaze edges
-depth = 3
-edge_list = [ ]
-
-for sku in all_skus: 
-  new_node_list = [ ]
-  for level_ in range(1, (depth + 1)):
-    new_edge_list, new_node_list = extend_one_level(new_node_list, level = level_, sku=sku)
-    edge_list.extend(new_edge_list)
-
-# COMMAND ----------
-
-# Define the graph 
-g=nx.DiGraph()
-g.add_edges_from(edge_list)  
-
-# COMMAND ----------
-
-# Assign a quantity for the graph
-edge_df = nx.to_pandas_edgelist(g)
-edge_df = edge_df.assign(qty = np.where(edge_df.target.str.len() == 10, 1, np.random.randint(1,4, size=edge_df.shape[0])))
-
-# COMMAND ----------
-
-#Create the fnal mat number to sku mapper 
-final_mat_number_to_sku_mapper = edge_df[edge_df.target.str.match('SRL|LRL|CAM|SRR|LRR_.*')][["source","target"]]
-final_mat_number_to_sku_mapper = final_mat_number_to_sku_mapper.rename(columns={"source": "final_mat_number", "target": "sku"} )
-
-# COMMAND ----------
-
-#Create the fnal mat number to sku mapper
-final_mat_number_to_sku_mapper = edge_df[edge_df.target.str.match('SRL|LRL|CAM|SRR|LRR_.*')][["source","target"]]
-final_mat_number_to_sku_mapper = final_mat_number_to_sku_mapper.rename(columns={"source": "final_mat_number", "target": "sku"} )
-
-# COMMAND ----------
-
-# Create BoM
-bom = edge_df[~edge_df.target.str.match('SRL|LRL|CAM|SRR|LRR_.*')]
-bom = bom.rename(columns={"source": "material_in", "target": "material_out"} )
-
-# COMMAND ----------
-
-bom_df = spark.createDataFrame(bom) 
-final_mat_number_to_sku_mapper_df = spark.createDataFrame(final_mat_number_to_sku_mapper)
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## Register tables in database
-
-# COMMAND ----------
-
-bom_df_delta_path = os.path.join(cloud_storage_path, 'bom_df_delta')
-
-# COMMAND ----------
-
-# Write the data 
-bom_df.write \
-.mode("overwrite") \
-.format("delta") \
-.save(bom_df_delta_path)
-
-# COMMAND ----------
-
-spark.sql(f"DROP TABLE IF EXISTS {dbName}.bom")
-spark.sql(f"CREATE TABLE {dbName}.bom USING DELTA LOCATION '{bom_df_delta_path}'")
-
-# COMMAND ----------
-
-final_mat_number_to_sku_mapper_df_path = os.path.join(cloud_storage_path, 'sku_mapper_df_delta')
-
-# COMMAND ----------
-
-final_mat_number_to_sku_mapper_df.write \
-.mode("overwrite") \
-.format("delta") \
-.save(final_mat_number_to_sku_mapper_df_path)
-
-# COMMAND ----------
-
-spark.sql(f"DROP TABLE IF EXISTS {dbName}.sku_mapper")
-spark.sql(f"CREATE TABLE {dbName}.sku_mapper USING DELTA LOCATION '{final_mat_number_to_sku_mapper_df_path}'")
-
-# COMMAND ----------
-
-display(spark.sql(f"select * from {dbName}.sku_mapper"))
-
-# COMMAND ----------
-
-display(spark.sql(f"select * from {dbName}.bom"))
 
 # COMMAND ----------
 
