@@ -199,8 +199,8 @@ display(products_in_stores_table)
 # We can achieve this by:
 # - disabling Adaptive Query Execution (AQE) just for this step
 # - partitioning our input Spark DataFrame as follows:
-spark.conf.set("spark.databricks.optimizer.adaptive.enabled", "false")
-n_tasks = products_in_stores_table.select("product", "store").distinct().count()
+#spark.conf.set("spark.databricks.optimizer.adaptive.enabled", "false")
+#n_tasks = products_in_stores_table.select("product", "store").distinct().count()
 
 
 # function to generate an ARMA process
@@ -254,12 +254,12 @@ def time_series_generator_pandas_udf(pdf):
 # Apply the Pandas UDF and clean up
 demand_df = ( 
   products_in_stores_table.
-   repartition(n_tasks, "product", "store").
+   #repartition(n_tasks, "product", "store").
    groupby("product", "store"). 
    applyInPandas(time_series_generator_pandas_udf, schema)
 )
 
-assert date_range.shape[0] * products_in_stores_table.count() == demand_df.count()
+#assert date_range.shape[0] * products_in_stores_table.count() == demand_df.count()
 
 display(demand_df)
 
@@ -300,8 +300,62 @@ display(spark.sql(f"SELECT COUNT(*) as row_count FROM {dbName}.part_level_demand
 
 # COMMAND ----------
 
-print("Ending ./_resources/01-data-generator")
+# MAGIC %md
+# MAGIC ## Generate hardware to distribution center mapping table
+
+# COMMAND ----------
+
+n_distribution_centers = 7
+
+# COMMAND ----------
+
+display(spark.sql(f"SELECT DISTINCT store FROM {dbName}.part_level_demand order by store"))
+
+# COMMAND ----------
+
+n_distribution_centers + 1
+
+# COMMAND ----------
+
+distribution_centers = (
+  spark.createDataFrame(list(range(1, n_distribution_centers + 1)),StringType()).
+  toDF("distribution_center_helper").
+  withColumn("distribution_center", f.concat_ws('_', f.lit("Distribution_Center"), f.col("distribution_center_helper"))).
+  select("distribution_center")
+)
+
+
+display(distribution_centers)
+
+# COMMAND ----------
+
+assert (distribution_centers.count() <= store_table.count()) & (distribution_centers.count() > 0)
+
+# COMMAND ----------
+
+divmod_res = divmod(store_table.count(), distribution_centers.count())
+
+# COMMAND ----------
+
+# Goal replicate distribution_centers and append column wise to store table
+
+distribution_centers_replicated = (
+  spark.createDataFrame(list(range(1, divmod_res[0] + 1)),StringType()).
+  toDF("number_helper").
+  crossJoin(distribution_centers).
+  select("distribution_center").
+  union(distribution_centers.head(divmod_res[1]))
+)
+display(distribution_centers_replicated)
+
+# COMMAND ----------
+
+distribution_centers.head(divmod_res[1])display(distribution_centers.head(divmod_res[1]))
 
 # COMMAND ----------
 
 
+
+# COMMAND ----------
+
+print("Ending ./_resources/01-data-generator")

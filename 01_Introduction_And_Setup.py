@@ -22,7 +22,7 @@
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC <img src="https://raw.githubusercontent.com/maxkoehlerdatabricks/supply_chain_optimization/max/pictures/Plant_DistributionCenter_Store_Prouct.png" width=70%>
+# MAGIC <img src="https://raw.githubusercontent.com/maxkoehlerdatabricks/supply_chain_optimization/max/pictures/Plant_DistributionCenter_Store_Prouct_2.png" width=70%>
 
 # COMMAND ----------
 
