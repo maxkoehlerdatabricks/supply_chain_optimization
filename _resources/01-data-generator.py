@@ -59,6 +59,7 @@ import matplotlib.pyplot as plt
 n=3 # Number of replicates per product category
 ts_length_in_weeks = 104 # Length of a time series in years
 number_of_stores = 30
+n_distribution_centers = 5
 
 # COMMAND ----------
 
@@ -199,8 +200,8 @@ display(products_in_stores_table)
 # We can achieve this by:
 # - disabling Adaptive Query Execution (AQE) just for this step
 # - partitioning our input Spark DataFrame as follows:
-#spark.conf.set("spark.databricks.optimizer.adaptive.enabled", "false")
-#n_tasks = products_in_stores_table.select("product", "store").distinct().count()
+spark.conf.set("spark.databricks.optimizer.adaptive.enabled", "false")
+n_tasks = products_in_stores_table.select("product", "store").distinct().count()
 
 
 # function to generate an ARMA process
@@ -305,18 +306,6 @@ display(spark.sql(f"SELECT COUNT(*) as row_count FROM {dbName}.part_level_demand
 
 # COMMAND ----------
 
-n_distribution_centers = 7
-
-# COMMAND ----------
-
-display(spark.sql(f"SELECT DISTINCT store FROM {dbName}.part_level_demand order by store"))
-
-# COMMAND ----------
-
-n_distribution_centers + 1
-
-# COMMAND ----------
-
 distribution_centers = (
   spark.createDataFrame(list(range(1, n_distribution_centers + 1)),StringType()).
   toDF("distribution_center_helper").
@@ -329,28 +318,81 @@ display(distribution_centers)
 
 # COMMAND ----------
 
+# We need more distribution centers than stores
 assert (distribution_centers.count() <= store_table.count()) & (distribution_centers.count() > 0)
 
-# COMMAND ----------
-
+#Replicate distribution centers such that all distribution centers are used, but the table has the same number of rows than store_table
 divmod_res = divmod(store_table.count(), distribution_centers.count())
 
-# COMMAND ----------
-
-# Goal replicate distribution_centers and append column wise to store table
-
-distribution_centers_replicated = (
+rest_helper = distribution_centers.limit(divmod_res[1])
+maximum_integer_divisor = (
   spark.createDataFrame(list(range(1, divmod_res[0] + 1)),StringType()).
   toDF("number_helper").
   crossJoin(distribution_centers).
-  select("distribution_center").
-  union(distribution_centers.head(divmod_res[1]))
+  select("distribution_center")
 )
-display(distribution_centers_replicated)
+
+distribution_centers_replicated = maximum_integer_divisor.unionAll(rest_helper)
+
+assert distribution_centers_replicated.count() == store_table.count()
+
+# Append distribution_centers_replicated and store_table column-wise
+distribution_centers_replicated = (distribution_centers_replicated.
+  withColumn("row_id", f.monotonically_increasing_id()).
+  withColumn('row_num', f.row_number().over(Window.orderBy('row_id'))).
+  drop(f.col("row_id"))
+                  )
+
+store_table = (store_table.
+                            withColumn("row_id", f.monotonically_increasing_id()).
+                            withColumn('row_num', f.row_number().over(Window.orderBy('row_id'))).
+                            drop(f.col("row_id"))
+                           )
+
+
+distribution_center_to_store_mapping_table = store_table.join(distribution_centers_replicated, ("row_num")).drop(f.col("row_num"))
+store_table = store_table.drop(f.col("row_num"))
+distribution_centers_replicated = distribution_centers_replicated.drop(f.col("row_num"))
+
+display(distribution_center_to_store_mapping_table)
 
 # COMMAND ----------
 
-distribution_centers.head(divmod_res[1])display(distribution_centers.head(divmod_res[1]))
+# MAGIC %md
+# MAGIC Save as a Delta table
+
+# COMMAND ----------
+
+demand_df_delta_path = os.path.join(cloud_storage_path, 'demand_df_delta')
+
+# COMMAND ----------
+
+# Write the data 
+demand_df.write \
+.mode("overwrite") \
+.format("delta") \
+.save(demand_df_delta_path)
+
+# COMMAND ----------
+
+spark.sql(f"DROP TABLE IF EXISTS {dbName}.part_level_demand")
+spark.sql(f"CREATE TABLE {dbName}.part_level_demand USING DELTA LOCATION '{demand_df_delta_path}'")
+
+# COMMAND ----------
+
+display(spark.sql(f"SELECT * FROM {dbName}.part_level_demand"))
+
+# COMMAND ----------
+
+
+
+# COMMAND ----------
+
+
+
+# COMMAND ----------
+
+
 
 # COMMAND ----------
 
