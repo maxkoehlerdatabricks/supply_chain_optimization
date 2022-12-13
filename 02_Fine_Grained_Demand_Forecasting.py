@@ -11,7 +11,7 @@
 # MAGIC 
 # MAGIC Key highlights for this notebook:
 # MAGIC - Use Databricks' collaborative and interactive notebook environment to find an appropriate time series mdoel
-# MAGIC - Pandas UDFs (user-defined functions) can take your single-node data science code, and distribute it across different keys (e.g. SKU)  
+# MAGIC - Pandas UDFs (user-defined functions) can take your single-node data science code, and distribute it across different keys  
 
 # COMMAND ----------
 
@@ -26,25 +26,10 @@ print(dbName)
 
 import os
 import datetime as dt
-from random import random
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-import matplotlib.ticker as ticker
-import matplotlib.dates as md
 
-from statsmodels.tsa.api import ExponentialSmoothing, SimpleExpSmoothing, Holt
-from statsmodels.tsa.statespace.sarimax import SARIMAX
-
-import mlflow
-import hyperopt
-from hyperopt import hp, fmin, tpe, SparkTrials, STATUS_OK, space_eval
-from hyperopt.pyll.base import scope
-mlflow.autolog(disable=True)
-
-from statsmodels.tsa.api import Holt
-from statsmodels.tsa.statespace.sarimax import SARIMAX
-from sklearn.metrics import mean_absolute_percentage_error
+from statsmodels.tsa.api import ExponentialSmoothing
 
 import pyspark.sql.functions as f
 from pyspark.sql.types import *
@@ -151,7 +136,7 @@ display(forecast_df)
 distribution_center_demand = (
   forecast_df.
   join(distribution_center_to_store_mapping_table, [ "store" ] , "left").
-  groupBy("distribution_center").
+  groupBy("distribution_center", "product").
   agg(f.sum("demand").alias("demand"))
 )                              
 
@@ -175,7 +160,6 @@ distribution_center_demand.write \
 .mode("overwrite") \
 .format("delta") \
 .save(distribution_center_demand_df_delta_path)
-
 
 # COMMAND ----------
 

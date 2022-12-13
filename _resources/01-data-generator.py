@@ -68,9 +68,14 @@ n_distribution_centers = 5
 
 # COMMAND ----------
 
-products_categories = spark.createDataFrame(
-  ["drilling machine","cordless screwdriver","impact drill","current meter","hammer","screwdriver","nail","screw","spirit level","toolbox"], 
-  StringType()).toDF("product_categories")
+ProdCatSchema = StructType([       
+    StructField('product_categories', StringType(), True),
+    StructField('transport_baseline_cost', FloatType(), True)
+])
+
+category_data = [("drilling machine", 0.72),("cordless screwdriver", 0.93),("impact drill", 1.11),("current meter", 0.71),("hammer", 0.97),("screwdriver",1.01) , ("nail", 0.91)  ,("screw", 0.61) ,("spirit level", 0.81),("toolbox", 1.31)]
+
+products_categories = spark.createDataFrame(data=category_data, schema = ProdCatSchema)
 
 products_versions = spark.createDataFrame(
   list(range(1,(n+1))),
@@ -79,7 +84,7 @@ products_versions = spark.createDataFrame(
 product_table = (
   products_categories.
   crossJoin(products_versions).
-  select(f.concat_ws('_', f.col("product_categories"), f.col("product_versions")).alias("product"))
+  select(f.concat_ws('_', f.col("product_categories"), f.col("product_versions")).alias("product"), f.col("transport_baseline_cost"))
                 )
 
 display(product_table)
@@ -157,12 +162,12 @@ np.random.seed(123)
 n_ = products_in_stores_table.count()
 
 
-variance_random_number = list(abs(np.random.normal(100, 50, n_)))
-offset_random_number = list(np.maximum(abs(np.random.normal(10000, 5000, n_)), 4000))
+variance_random_number = list(abs(np.random.normal(10, 2, n_)))
+offset_random_number = list(np.maximum(abs(np.random.normal(100, 50, n_)), 30))
 ar_length_random_number = np.random.choice(list(range(1,4)), n_)
-ar_parameters_random_number = [np.random.uniform(low=0.1, high=0.9, size=x) for x in ar_length_random_number] 
+ar_parameters_random_number = [np.random.uniform(low=0.1, high=0.3, size=x) for x in ar_length_random_number] 
 ma_length_random_number = np.random.choice(list(range(1,4)), n_)
-ma_parameters_random_number = [np.random.uniform(low=0.1, high=0.9, size=x) for x in ma_length_random_number] 
+ma_parameters_random_number = [np.random.uniform(low=0.1, high=0.3, size=x) for x in ma_length_random_number] 
 
 
 # Collect in a dataframe
@@ -209,7 +214,7 @@ def generate_arma(arparams, maparams, var, offset, number_of_points, plot):
   np.random.seed(123)
   ar = np.r_[1, arparams] 
   ma = np.r_[1, maparams] 
-  y = sm.tsa.arma_generate_sample(ar, ma, number_of_points, scale=var, burnin= 3000) + offset
+  y = sm.tsa.arma_generate_sample(ar, ma, number_of_points, scale=var, burnin= 1) + offset
   y = np.round(y).astype(int)
   y = np.absolute(y)
   
@@ -242,6 +247,7 @@ def time_series_generator_pandas_udf(pdf):
                         plot = False),
   product = pdf["product"].iloc[0],
   store = pdf["store"].iloc[0]
+    
   )
   
   out_df["row_number"] = range(0,len(out_df))
@@ -257,12 +263,18 @@ demand_df = (
   products_in_stores_table.
    #repartition(n_tasks, "product", "store").
    groupby("product", "store"). 
-   applyInPandas(time_series_generator_pandas_udf, schema)
+   applyInPandas(time_series_generator_pandas_udf, schema).
+   select("product", "store", "date", "demand")
 )
 
 #assert date_range.shape[0] * products_in_stores_table.count() == demand_df.count()
 
 display(demand_df)
+
+# COMMAND ----------
+
+# Test if demand is in a realistic range
+#display(demand_df.groupBy("product", "store").mean("demand"))
 
 # COMMAND ----------
 
@@ -381,6 +393,111 @@ spark.sql(f"CREATE TABLE {dbName}.distribution_center_to_store_mapping_table USI
 # COMMAND ----------
 
 display(spark.sql(f"SELECT * FROM {dbName}.distribution_center_to_store_mapping_table"))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Generate a transport cost table for each plant to each ditribution center for each product
+
+# COMMAND ----------
+
+baseline_costs = products_in_stores_table.select("product", "transport_baseline_cost" ).distinct()
+display(baseline_costs)
+
+# COMMAND ----------
+
+n_plants = 3
+
+# COMMAND ----------
+
+plants_lst = ["plant_" + str(i) for i in  range(1,n_plants+1)]
+plants_df = spark.createDataFrame([(p,) for p in plants_lst], ['plant'])
+display(plants_df)
+
+# COMMAND ----------
+
+distribution_center_to_store_mapping_table = spark.read.table(f"{dbName}.distribution_center_demand")
+distribution_center_df = distribution_center_to_store_mapping_table.select("distribution_center", "product").distinct()
+distribution_center_df = distribution_center_df.join(baseline_costs, ["product"],  how="inner")
+display(distribution_center_df)
+
+# COMMAND ----------
+
+plants_to_distribution_centers = plants_df.crossJoin(distribution_center_df)
+display(plants_to_distribution_centers)
+
+# COMMAND ----------
+
+# For testing
+#pdf = plants_to_distribution_centers.filter( (f.col("plant") == "plant_1") & (f.col("product") == "drilling machine_1")).toPandas()
+
+# COMMAND ----------
+
+def cost_generator(pdf: pd.DataFrame) -> pd.DataFrame:
+  pdf_return = pdf.assign(transprot_cost_variation =  np.random.uniform(low=1.1, high=2.0, size=len(pdf)))
+  pdf_return["transport_cost"] = pdf_return["transport_baseline_cost"] * pdf_return["transprot_cost_variation"]
+  pdf_return = pdf_return[[ "plant", "product", "distribution_center", "transport_cost"]]
+  return pdf_return
+
+# COMMAND ----------
+
+cost_schema = StructType(
+  [
+    StructField('plant', StringType()),
+    StructField('product', StringType()),
+    StructField('distribution_center', StringType()),
+    StructField('transport_cost', FloatType())
+  ]
+)
+
+# COMMAND ----------
+
+spark.conf.set("spark.databricks.optimizer.adaptive.enabled", "false")
+n_tasks = plants_to_distribution_centers.select("plant", "product").distinct().count()
+
+transport_cost_table = (
+  plants_to_distribution_centers
+  .repartition(n_tasks, "plant", "product")
+  .groupBy("plant", "product")
+  .applyInPandas(cost_generator, schema=cost_schema)
+)
+
+display(transport_cost_table)
+
+# COMMAND ----------
+
+transport_cost_table = (transport_cost_table.
+                        groupBy("plant", "product").
+                        pivot("distribution_center").
+                        agg(f.first("transport_cost")).orderBy("product", "plant")
+                       )
+display(transport_cost_table)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC Save as a Delta table
+
+# COMMAND ----------
+
+cost_table_delta_path = os.path.join(cloud_storage_path, 'cost_table')
+
+# COMMAND ----------
+
+# Write the data 
+transport_cost_table.write \
+.mode("overwrite") \
+.format("delta") \
+.save(cost_table_delta_path)
+
+# COMMAND ----------
+
+spark.sql(f"DROP TABLE IF EXISTS {dbName}.transport_cost_table")
+spark.sql(f"CREATE TABLE {dbName}.transport_cost_table USING DELTA LOCATION '{cost_table_delta_path}'")
+
+# COMMAND ----------
+
+display(spark.sql(f"SELECT * FROM {dbName}.transport_cost_table"))
 
 # COMMAND ----------
 
