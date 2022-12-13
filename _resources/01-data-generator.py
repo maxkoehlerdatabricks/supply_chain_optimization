@@ -267,7 +267,7 @@ display(demand_df)
 # COMMAND ----------
 
 # Select a sepecific time series
-display(demand_df.join(demand_df.sample(False, 1 / demand_df.count(), seed=0).limit(1).select("product", "store"), on=["product", "store"], how="inner"))
+# display(demand_df.join(demand_df.sample(False, 1 / demand_df.count(), seed=0).limit(1).select("product", "store"), on=["product", "store"], how="inner"))
 
 # COMMAND ----------
 
@@ -363,40 +363,24 @@ display(distribution_center_to_store_mapping_table)
 
 # COMMAND ----------
 
-demand_df_delta_path = os.path.join(cloud_storage_path, 'demand_df_delta')
+distribution_center_to_store_mapping_delta_path = os.path.join(cloud_storage_path, 'distribution_center_to_store_mapping')
 
 # COMMAND ----------
 
 # Write the data 
-demand_df.write \
+distribution_center_to_store_mapping_table.write \
 .mode("overwrite") \
 .format("delta") \
-.save(demand_df_delta_path)
+.save(distribution_center_to_store_mapping_delta_path)
 
 # COMMAND ----------
 
-spark.sql(f"DROP TABLE IF EXISTS {dbName}.part_level_demand")
-spark.sql(f"CREATE TABLE {dbName}.part_level_demand USING DELTA LOCATION '{demand_df_delta_path}'")
+spark.sql(f"DROP TABLE IF EXISTS {dbName}.distribution_center_to_store_mapping_table")
+spark.sql(f"CREATE TABLE {dbName}.distribution_center_to_store_mapping_table USING DELTA LOCATION '{distribution_center_to_store_mapping_delta_path}'")
 
 # COMMAND ----------
 
-display(spark.sql(f"SELECT * FROM {dbName}.part_level_demand"))
-
-# COMMAND ----------
-
-
-
-# COMMAND ----------
-
-
-
-# COMMAND ----------
-
-
-
-# COMMAND ----------
-
-
+display(spark.sql(f"SELECT * FROM {dbName}.distribution_center_to_store_mapping_table"))
 
 # COMMAND ----------
 

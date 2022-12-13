@@ -56,47 +56,108 @@ demand_df = demand_df.cache() # just for this example notebook
 
 # COMMAND ----------
 
-# MAGIC %md
-# MAGIC ### Examine an example: Extract a single time series and convert to pandas dataframe
-
-# COMMAND ----------
-
 display(demand_df)
 
 # COMMAND ----------
 
-example_product = demand_df.select("product").orderBy("product").limit(1).collect()[0].product
-example_store = demand_df.select("store").orderBy("store").limit(1).collect()[0].store
-example_store
-
-# COMMAND ----------
-
-example_product = demand_df.select("product").orderBy("product").limit(1).collect()[0].product
-example_store = demand_df.select("store").orderBy("store").limit(1).collect()[0].store
-pdf = demand_df.filter( (f.col("product") == example_product) & (f.col("store") == example_store)  ).toPandas()
-
-# Create single series 
-series_df = pd.Series(pdf['demand'].values, index=pdf['date'])
-series_df = series_df.asfreq(freq='W-MON')
-
-display(series_df)
+# This is just to create one example for development and testing
+#example_product = demand_df.select("product").orderBy("product").limit(1).collect()[0].product
+#example_store = demand_df.select("store").orderBy("store").limit(1).collect()[0].store
+#pdf = demand_df.filter( (f.col("product") == example_product) & (f.col("store") == example_store)  ).toPandas()
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ### Find a Model via Holt’s Winters Seasonal Method
+# MAGIC ### One-step ahead forecast via Holt’s Winters Seasonal Method
 
 # COMMAND ----------
 
-fit1 = ExponentialSmoothing(
-    pdf,
-    seasonal_periods=3,
-    trend="add",
-    seasonal="add",
-    use_boxcox=True,
-    initialization_method="estimated",
-).fit(method="ls")
-fcast1 = fit1.forecast(forecast_horizon).rename("Additive trend and additive seasonal")
+def one_step_ahead_forecast(pdf: pd.DataFrame) -> pd.DataFrame:
+
+    #Prepare seroes for forecast
+    series_df = pd.Series(pdf['demand'].values, index=pdf['date'])
+    series_df = series_df.asfreq(freq='W-MON')
+
+    # One-step ahead forecast
+    fit1 = ExponentialSmoothing(
+        series_df,
+        trend="add",
+        seasonal="add",
+        use_boxcox=False,
+        initialization_method="estimated",
+    ).fit(method="ls")
+    fcast1 = fit1.forecast(1).rename("Additive trend and additive seasonal")
+
+    # Collect Result
+    df = pd.DataFrame(data = 
+                      {
+                         'product': pdf['product'].iloc[0], 
+                         'store': pdf['store'].iloc[0], 
+                         'date' : pd.to_datetime(series_df.index.values[-1]) + dt.timedelta(days=7), 
+                         'demand' : int(abs(fcast1.iloc[-1]))
+                      }, 
+                          index = [0]
+                     )
+    return df
+
+# COMMAND ----------
+
+fc_schema = StructType(
+  [
+    StructField('product', StringType()),
+    StructField('store', StringType()),
+    StructField('date', DateType()),
+    StructField('demand', FloatType())
+  ]
+)
+
+# COMMAND ----------
+
+spark.conf.set("spark.databricks.optimizer.adaptive.enabled", "false")
+n_tasks = demand_df.select("product", "store").distinct().count()
+
+forecast_df = (
+  demand_df
+  .repartition(n_tasks, "product", "store")
+  .groupBy("product", "store")
+  .applyInPandas(one_step_ahead_forecast, schema=fc_schema)
+)
+
+display(forecast_df)
+
+# COMMAND ----------
+
+assert demand_df.select('product', 'store').distinct().count() == forecast_df.count()
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Aggregate forecasts on distribution center level
+
+# COMMAND ----------
+
+distribution_center_to_store_mapping_table = spark.read.table(f"{dbName}.distribution_center_to_store_mapping_table")
+
+# COMMAND ----------
+
+display(distribution_center_to_store_mapping_table)
+
+# COMMAND ----------
+
+display(forecast_df)
+
+# COMMAND ----------
+
+distribution_center_demand = (
+  forecast_df.
+  join(distribution_center_to_store_mapping_table, [ "store" ] , "left").
+  groupBy("distribution_center").
+  agg(f.sum("demand").alias("demand"))
+)                              
+
+# COMMAND ----------
+
+display(distribution_center_demand)
 
 # COMMAND ----------
 
