@@ -68,7 +68,7 @@ display(demand_df)
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ### One-step ahead forecast via Holt’s Winters Seasonal Method
+# MAGIC ## One-step ahead forecast via Holt’s Winters Seasonal Method
 
 # COMMAND ----------
 
@@ -132,7 +132,7 @@ assert demand_df.select('product', 'store').distinct().count() == forecast_df.co
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ### Aggregate forecasts on distribution center level
+# MAGIC ## Aggregate forecasts on distribution center level
 
 # COMMAND ----------
 
@@ -158,6 +158,33 @@ distribution_center_demand = (
 # COMMAND ----------
 
 display(distribution_center_demand)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Save to delta
+
+# COMMAND ----------
+
+distribution_center_demand_df_delta_path = os.path.join(cloud_storage_path, 'distribution_center_demand_df_delta')
+
+# COMMAND ----------
+
+# Write the data 
+distribution_center_demand.write \
+.mode("overwrite") \
+.format("delta") \
+.save(distribution_center_demand_df_delta_path)
+
+
+# COMMAND ----------
+
+spark.sql(f"DROP TABLE IF EXISTS {dbName}.distribution_center_demand")
+spark.sql(f"CREATE TABLE {dbName}.distribution_center_demand USING DELTA LOCATION '{distribution_center_demand_df_delta_path}'")
+
+# COMMAND ----------
+
+display(spark.sql(f"SELECT * FROM {dbName}.distribution_center_demand"))
 
 # COMMAND ----------
 
