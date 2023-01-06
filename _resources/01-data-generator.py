@@ -57,9 +57,10 @@ import matplotlib.pyplot as plt
 # COMMAND ----------
 
 n=3 # Number of replicates per product category
-ts_length_in_weeks = 104 # Length of a time series in years
+ts_length_in_weeks = 104 # Length of a time series in weeks
 number_of_stores = 30
 n_distribution_centers = 5
+n_plants = 3 # Number of plants
 
 # COMMAND ----------
 
@@ -138,12 +139,6 @@ display(date_range)
 
 # MAGIC %md
 # MAGIC Simulate parameters for ARMA series
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC To Do: 
-# MAGIC - Make more realistic to have similar magnitudes per product group
 
 # COMMAND ----------
 
@@ -406,18 +401,19 @@ display(baseline_costs)
 
 # COMMAND ----------
 
-n_plants = 3
-
-# COMMAND ----------
-
 plants_lst = ["plant_" + str(i) for i in  range(1,n_plants+1)]
 plants_df = spark.createDataFrame([(p,) for p in plants_lst], ['plant'])
 display(plants_df)
 
 # COMMAND ----------
 
-distribution_center_to_store_mapping_table = spark.read.table(f"{dbName}.distribution_center_demand")
-distribution_center_df = distribution_center_to_store_mapping_table.select("distribution_center", "product").distinct()
+tmp_map_distribution_center_to_store = spark.read.table(f"{dbName}.distribution_center_to_store_mapping_table")
+distribution_center_df = (spark.read.table(f"{dbName}.part_level_demand").
+                          select("product","store").
+                          join(tmp_map_distribution_center_to_store, ["store"],  how="inner").
+                          select("product","distribution_center").
+                          distinct()
+                         )
 distribution_center_df = distribution_center_df.join(baseline_costs, ["product"],  how="inner")
 display(distribution_center_df)
 
@@ -498,6 +494,75 @@ spark.sql(f"CREATE TABLE {dbName}.transport_cost_table USING DELTA LOCATION '{co
 # COMMAND ----------
 
 display(spark.sql(f"SELECT * FROM {dbName}.transport_cost_table"))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Generate a maximum supply table for each plant and product
+
+# COMMAND ----------
+
+# Create a list with all plants
+all_plants = spark.read.table(f"{dbName}.transport_cost_table").select("plant").distinct().collect()
+all_plants = [row[0] for row in all_plants]
+
+# Create a list with fractions: Sum must be larger than one to fullfill the demands
+fractions_lst = [round(random.uniform(0.4, 0.8),1) for x in all_plants[1:]]
+fractions_lst.append(max( 0.4,  1 - sum(fractions_lst)))
+
+# Combine to a dictionary
+plant_supply_in_percentage_of_demand = {all_plants[i]: fractions_lst[i] for i in range(len(all_plants))}
+
+#Get maximum demand in history and sum up the demand of all distribution centers
+map_store_to_dc_tmp = spark.read.table(f"{dbName}.distribution_center_to_store_mapping_table")
+max_demands_per_dc = (spark.read.table(f"{dbName}.part_level_demand").
+                      groupBy("product", "store").
+                      agg(f.max("demand").alias("demand")).
+                      join(map_store_to_dc_tmp, ["store"], how = "inner"). # This join will not produce duplicates, as one store is assigned to exactly one distribution center
+                      groupBy("product").
+                      agg(f.sum("demand").alias("demand"))   
+                      ) 
+# Distribute parts of the demands per product to the plants
+for item in plant_supply_in_percentage_of_demand.items():
+  max_demands_per_dc = max_demands_per_dc.withColumn(item[0], f.ceil(item[1] * f.col("demand")))
+
+# This table must be saved in Delta later  
+plant_supply = max_demands_per_dc.select("product", *all_plants).sort("product")
+#display(plant_supply)
+
+# COMMAND ----------
+
+display(spark.read.table(f"{dbName}.distribution_center_to_store_mapping_table"))
+
+# COMMAND ----------
+
+display(spark.read.table(f"{dbName}.part_level_demand"))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC Save as a Delta table
+
+# COMMAND ----------
+
+supply_table_delta_path = os.path.join(cloud_storage_path, 'supply_table')
+
+# COMMAND ----------
+
+# Write the data 
+plant_supply.write \
+.mode("overwrite") \
+.format("delta") \
+.save(supply_table_delta_path)
+
+# COMMAND ----------
+
+spark.sql(f"DROP TABLE IF EXISTS {dbName}.supply_table")
+spark.sql(f"CREATE TABLE {dbName}.supply_table USING DELTA LOCATION '{supply_table_delta_path}'")
+
+# COMMAND ----------
+
+display(spark.sql(f"SELECT * FROM {dbName}.supply_table"))
 
 # COMMAND ----------
 
