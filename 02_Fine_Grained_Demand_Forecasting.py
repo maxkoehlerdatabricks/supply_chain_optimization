@@ -6,9 +6,9 @@
 
 # MAGIC %md
 # MAGIC *Prerequisite: Make sure to run 01_Introduction_And_Setup before running this notebook.*
-# MAGIC 
+# MAGIC
 # MAGIC In this notebook we to a one-week-ahead forecast to estimate next week's demand for each store and product. We then aggregate on a distribution center level for each product.
-# MAGIC 
+# MAGIC
 # MAGIC Key highlights for this notebook:
 # MAGIC - Use Databricks' collaborative and interactive notebook environment to find an appropriate time series mdoel
 # MAGIC - Pandas UDFs (user-defined functions) can take your single-node data science code, and distribute it across different keys  
@@ -19,8 +19,8 @@
 
 # COMMAND ----------
 
-print(cloud_storage_path)
-print(dbName)
+spark.sql(f"""USE CATALOG {catalogName}""")
+spark.sql(f"""USE {dbName}""")
 
 # COMMAND ----------
 
@@ -36,7 +36,7 @@ from pyspark.sql.types import *
 
 # COMMAND ----------
 
-demand_df = spark.read.table(f"{dbName}.part_level_demand")
+demand_df = spark.read.table(f"part_level_demand")
 demand_df = demand_df.cache() # just for this example notebook
 
 # COMMAND ----------
@@ -121,7 +121,7 @@ assert demand_df.select('product', 'store').distinct().count() == forecast_df.co
 
 # COMMAND ----------
 
-distribution_center_to_store_mapping_table = spark.read.table(f"{dbName}.distribution_center_to_store_mapping_table")
+distribution_center_to_store_mapping_table = spark.read.table(f"distribution_center_to_store_mapping_table")
 
 # COMMAND ----------
 
@@ -151,25 +151,4 @@ display(distribution_center_demand)
 
 # COMMAND ----------
 
-distribution_center_demand_df_delta_path = os.path.join(cloud_storage_path, 'distribution_center_demand_df_delta')
-
-# COMMAND ----------
-
-# Write the data 
-distribution_center_demand.write \
-.mode("overwrite") \
-.format("delta") \
-.save(distribution_center_demand_df_delta_path)
-
-# COMMAND ----------
-
-spark.sql(f"DROP TABLE IF EXISTS {dbName}.distribution_center_demand")
-spark.sql(f"CREATE TABLE {dbName}.distribution_center_demand USING DELTA LOCATION '{distribution_center_demand_df_delta_path}'")
-
-# COMMAND ----------
-
-display(spark.sql(f"SELECT * FROM {dbName}.distribution_center_demand"))
-
-# COMMAND ----------
-
-
+distribution_center_demand.write.mode("overwrite").saveAsTable("distribution_center_demand")

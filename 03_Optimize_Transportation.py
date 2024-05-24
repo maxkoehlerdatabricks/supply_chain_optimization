@@ -6,20 +6,20 @@
 
 # MAGIC %md
 # MAGIC *Prerequisite: Make sure to run 02_Fine_Grained_Demand_Forecasting before running this notebook.*
-# MAGIC 
+# MAGIC
 # MAGIC In this notebook we solve the LP to optimize transport costs when shipping products from the plants to the distribution centers. Furthermore, we show how to scale to hunderd thousands of products.
-# MAGIC 
+# MAGIC
 # MAGIC Key highlights for this notebook:
 # MAGIC - Use Databricks' collaborative and interactive notebook environment to find optimization procedure
 # MAGIC - Pandas UDFs (user-defined functions) can take your single-node data science code, and distribute it across different keys 
-# MAGIC 
+# MAGIC
 # MAGIC More precisely we solve the following optimzation problem for each product.
-# MAGIC 
+# MAGIC
 # MAGIC *Mathematical goal:*
 # MAGIC We have a set of plants that distribute products to a set of distribution centers. The goal is to minimize overall shipment costs, i.e. we minimize w.r.t. quantities: <br/>
 # MAGIC cost_of_plant_1_to_distribution_center_1 * quantity_shipped_of_plant_1_to_distribution_center_1 <br/> \+ … \+ <br/>
 # MAGIC cost_of_plant_1_to_distribution_center_n * quantity_shipped_of_plant_n_to_distribution_center_m 
-# MAGIC 
+# MAGIC
 # MAGIC *Mathematical constraints:*
 # MAGIC - quantities shipped must be zero or positive integers
 # MAGIC - summing up the quantities shipped from one plant does not exceed the maximum supply of the plant for each product
@@ -38,11 +38,6 @@
 
 # COMMAND ----------
 
-print(cloud_storage_path)
-print(dbName)
-
-# COMMAND ----------
-
 import os
 import datetime as dt
 import re
@@ -56,13 +51,18 @@ from pyspark.sql.types import *
 
 # COMMAND ----------
 
+spark.sql(f"""USE CATALOG {catalogName}""")
+spark.sql(f"""USE {dbName}""")
+
+# COMMAND ----------
+
 # MAGIC %md
 # MAGIC ## Defining and solving the LP
 
 # COMMAND ----------
 
 # Demand for each distribution center, one line per product
-distribution_center_demand = spark.read.table(f"{dbName}.distribution_center_demand")
+distribution_center_demand = spark.read.table(f"distribution_center_demand")
 distribution_center_demand = distribution_center_demand.groupBy("Product").pivot("distribution_center").agg(f.first("demand").alias("demand"))
 for name in distribution_center_demand.schema.names:
   distribution_center_demand = distribution_center_demand.withColumnRenamed(name, name.replace("Distribution_Center", "Demand_Distribution_Center"))
@@ -72,7 +72,7 @@ display(distribution_center_demand)
 # COMMAND ----------
 
 # Plant supply, one line per product
-plant_supply = spark.read.table(f"{dbName}.supply_table")
+plant_supply = spark.read.table(f"supply_table")
 for name in plant_supply.schema.names:
   plant_supply = plant_supply.withColumnRenamed(name, name.replace("plant", "Supply_Plant"))
 plant_supply = plant_supply.sort("product")
@@ -81,7 +81,7 @@ display(plant_supply)
 # COMMAND ----------
 
 # Transportation cost table, one, line per product and plant
-transport_cost_table = spark.read.table(f"{dbName}.transport_cost_table")
+transport_cost_table = spark.read.table(f"transport_cost_table")
 for name in transport_cost_table.schema.names:
   transport_cost_table = transport_cost_table.withColumnRenamed(name, name.replace("Distribution_Center", "Cost_Distribution_Center"))
 display(transport_cost_table)
@@ -233,25 +233,4 @@ optimal_transport_df = (
 
 # COMMAND ----------
 
-shipment_recommendations_df_delta_path = os.path.join(cloud_storage_path, 'shipment_recommendations_df_delta')
-
-# COMMAND ----------
-
-# Write the data 
-optimal_transport_df.write \
-.mode("overwrite") \
-.format("delta") \
-.save(shipment_recommendations_df_delta_path)
-
-# COMMAND ----------
-
-spark.sql(f"DROP TABLE IF EXISTS {dbName}.shipment_recommendations")
-spark.sql(f"CREATE TABLE {dbName}.shipment_recommendations USING DELTA LOCATION '{shipment_recommendations_df_delta_path}'")
-
-# COMMAND ----------
-
-display(spark.sql(f"SELECT * FROM {dbName}.shipment_recommendations"))
-
-# COMMAND ----------
-
-
+optimal_transport_df.write.mode("overwrite").saveAsTable("shipment_recommendations")
